@@ -31,23 +31,17 @@ PAGE_SIZES = {
 # Fixed high-contrast look, optimized for black & white KDP interior printing.
 THEME = {"primary": (0, 0, 0), "text": (0, 0, 0)}
 
-# Short visual-scene hints used to build a cover-art AI image prompt per theme.
-COVER_THEME_HINTS = {
-    "Farm Animals": "a cheerful farmyard scene with a cow, pig, chickens, and a red barn under a sunny blue sky",
-    "Ocean & Sea Life": "a colorful underwater scene with a dolphin, tropical fish, and a coral reef",
-    "Dinosaurs": "friendly cartoon dinosaurs in a lush prehistoric jungle landscape",
-    "Space & Astronauts": "a fun outer-space scene with planets, stars, and a cartoon astronaut floating by a rocket",
-    "Jungle & Safari": "a lively jungle safari scene with a lion, an elephant, and tropical plants",
-    "Halloween": "a fun, not-scary Halloween scene with a friendly pumpkin, a cute ghost, and a haunted house",
-    "Fantasy Castle": "a whimsical fantasy scene with a castle, a friendly dragon, and a knight",
-    "Robots & Tech": "a playful scene with colorful cartoon robots and gadgets",
-    "Under the Sea Pirates": "a fun pirate scene with a treasure chest, a ship, and a parrot",
-    "Winter Wonderland": "a cozy winter scene with snow, a snowman, and pine trees",
+# The maze SHAPE is the product differentiator (not a cover art theme) — a
+# short hint per shape flavors the cover art prompt instead of a scene bank.
+SHAPE_COVER_HINTS = {
+    "Circle": "circular maze rings",
+    "Triangle": "triangular maze patterns",
+    "Square": "classic grid maze patterns",
 }
 
 
-def build_cover_prompt(book_title, theme_choice, page_w, page_h):
-    subject = COVER_THEME_HINTS.get(theme_choice, "a fun, colorful puzzle-book theme")
+def build_cover_prompt(book_title, shape, page_w, page_h):
+    shape_hint = SHAPE_COVER_HINTS.get(shape, "maze patterns")
     title_text = book_title.strip() if book_title.strip() else "MAZE"
     orientation = "portrait" if page_h >= page_w else "landscape"
     trim_w = f"{page_w:g}"
@@ -55,9 +49,10 @@ def build_cover_prompt(book_title, theme_choice, page_w, page_h):
     return (
         f"Create a vibrant, full-color book cover illustration for a kids' MAZE puzzle book. "
         f"Make it immediately obvious this is a maze / puzzle book - for example, weave a few "
-        f"playful winding path lines or a faint maze-corner pattern into the background "
-        f"or border of the scene, without covering the main illustration. "
-        f'Scene: {subject}. Bright, cheerful, high-contrast colors, playful cartoon illustration style, '
+        f"playful {shape_hint} or winding path lines into the background or border of the scene, "
+        f"without covering the main illustration. "
+        f"Scene: a fun, colorful, adventurous scene with a cheerful cartoon character exploring a maze. "
+        f"Bright, cheerful, high-contrast colors, playful cartoon illustration style, "
         f"friendly and inviting for kids and parents browsing an online bookstore. "
         f'Include the title "{title_text}" in bold, playful, easy-to-read lettering, designed as part of '
         f"the cover artwork (not added afterward). "
@@ -149,12 +144,62 @@ def prepare_photo(uploaded_file, box_w, box_h, fill_mode):
 MAZE_DIRS = [("N", 0, -1), ("S", 0, 1), ("E", 1, 0), ("W", -1, 0)]
 MAZE_OPPOSITE = {"N": "S", "S": "N", "E": "W", "W": "E"}
 MAZE_SIZES = {"Small (10 x 10)": (10, 10), "Medium (15 x 15)": (15, 15), "Large (20 x 20)": (20, 20)}
+MAZE_SHAPES = ["Square", "Circle", "Triangle"]
 
 
-def generate_maze(width, height):
-    walls = {(x, y): {"N": True, "S": True, "E": True, "W": True} for x in range(width) for y in range(height)}
-    visited = {(0, 0)}
-    stack = [(0, 0)]
+def build_shape_cells(width, height, shape):
+    """Which (x, y) cells are part of the puzzle. Square = every cell (the
+    original behavior). Circle/Triangle carve a shape out of the square grid —
+    the boundary is a bit staircase-y since it's still built from square cells,
+    but it reads clearly as the intended shape once printed."""
+    cx, cy = (width - 1) / 2, (height - 1) / 2
+    if shape == "Circle":
+        r = min(width, height) / 2
+        return {(x, y) for x in range(width) for y in range(height)
+                if ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 <= r}
+    if shape == "Triangle":
+        cells = set()
+        for y in range(height):
+            half_w = (width * (y + 1) / height) / 2
+            for x in range(width):
+                if abs(x - cx) <= half_w:
+                    cells.add((x, y))
+        return cells
+    return {(x, y) for x in range(width) for y in range(height)}
+
+
+def pick_entrance_exit(cells):
+    """Entrance = the boundary cell closest to the top-left, exit = the one
+    closest to the bottom-right — for a full Square grid this is exactly
+    (0, 0) and (width-1, height-1), same as the original behavior."""
+    def is_boundary(x, y):
+        return any((x + dx, y + dy) not in cells for _, dx, dy in MAZE_DIRS)
+
+    boundary = [c for c in cells if is_boundary(*c)]
+    entrance = min(boundary, key=lambda c: c[0] + c[1])
+    exit_ = max(boundary, key=lambda c: c[0] + c[1])
+    return entrance, exit_
+
+
+def open_outer_wall(walls, cells, cell, preferred_dirs):
+    """Open whichever of this cell's walls actually faces outside the shape
+    (a neighbor that doesn't exist), preferring the given direction order."""
+    x, y = cell
+    dir_map = {d: (dx, dy) for d, dx, dy in MAZE_DIRS}
+    for d in preferred_dirs:
+        dx, dy = dir_map[d]
+        if (x + dx, y + dy) not in cells:
+            walls[cell][d] = False
+            return
+
+
+def generate_maze(width, height, cells=None):
+    if cells is None:
+        cells = build_shape_cells(width, height, "Square")
+    walls = {c: {"N": True, "S": True, "E": True, "W": True} for c in cells}
+    start = min(cells)
+    visited = {start}
+    stack = [start]
     while stack:
         x, y = stack[-1]
         dirs = MAZE_DIRS[:]
@@ -162,7 +207,7 @@ def generate_maze(width, height):
         moved = False
         for d, dx, dy in dirs:
             nx, ny = x + dx, y + dy
-            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in visited:
+            if (nx, ny) in cells and (nx, ny) not in visited:
                 walls[(x, y)][d] = False
                 walls[(nx, ny)][MAZE_OPPOSITE[d]] = False
                 visited.add((nx, ny))
@@ -171,13 +216,14 @@ def generate_maze(width, height):
                 break
         if not moved:
             stack.pop()
-    walls[(0, 0)]["W"] = False
-    walls[(width - 1, height - 1)]["E"] = False
-    return walls
+
+    entrance, exit_ = pick_entrance_exit(cells)
+    open_outer_wall(walls, cells, entrance, ["W", "N", "S", "E"])
+    open_outer_wall(walls, cells, exit_, ["E", "S", "N", "W"])
+    return walls, entrance, exit_
 
 
-def solve_maze(walls, width, height):
-    start, end = (0, 0), (width - 1, height - 1)
+def solve_maze(walls, cells, start, end):
     queue = deque([start])
     came_from = {start: None}
     while queue:
@@ -187,7 +233,7 @@ def solve_maze(walls, width, height):
         x, y = cur
         for d, dx, dy in MAZE_DIRS:
             nxt = (x + dx, y + dy)
-            if not walls[(x, y)][d] and 0 <= nxt[0] < width and 0 <= nxt[1] < height:
+            if not walls[(x, y)][d] and nxt in cells:
                 if nxt not in came_from:
                     came_from[nxt] = cur
                     queue.append(nxt)
@@ -200,7 +246,8 @@ def solve_maze(walls, width, height):
     return path
 
 
-def draw_maze_page(pdf, page_w, page_h, theme, title, walls, width, height, solution_path=None):
+def draw_maze_page(pdf, page_w, page_h, theme, title, walls, cells, width, height,
+                    entrance, exit_, solution_path=None):
     text_color = theme["text"]
 
     pdf.add_page()
@@ -222,19 +269,17 @@ def draw_maze_page(pdf, page_w, page_h, theme, title, walls, width, height, solu
 
     pdf.set_draw_color(*text_color)
     pdf.set_line_width(0.025)
-    for x in range(width):
-        for y in range(height):
-            cx = x0 + x * cell
-            cy = y0 + y * cell
-            w = walls[(x, y)]
-            if w["N"]:
-                pdf.line(cx, cy, cx + cell, cy)
-            if w["S"]:
-                pdf.line(cx, cy + cell, cx + cell, cy + cell)
-            if w["W"]:
-                pdf.line(cx, cy, cx, cy + cell)
-            if w["E"]:
-                pdf.line(cx + cell, cy, cx + cell, cy + cell)
+    for (x, y), w in walls.items():
+        cx = x0 + x * cell
+        cy = y0 + y * cell
+        if w["N"]:
+            pdf.line(cx, cy, cx + cell, cy)
+        if w["S"]:
+            pdf.line(cx, cy + cell, cx + cell, cy + cell)
+        if w["W"]:
+            pdf.line(cx, cy, cx, cy + cell)
+        if w["E"]:
+            pdf.line(cx + cell, cy, cx + cell, cy + cell)
 
     if solution_path:
         # Mid-gray, not black — a black solution line is nearly invisible against
@@ -244,7 +289,25 @@ def draw_maze_page(pdf, page_w, page_h, theme, title, walls, width, height, solu
         pts = [(x0 + (x + 0.5) * cell, y0 + (y + 0.5) * cell) for x, y in solution_path]
         for i in range(len(pts) - 1):
             pdf.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1])
-        pdf.set_draw_color(*text_color)
+
+    # A small flag marks the entrance and a star marks the exit — a plain grid
+    # of lines reads as pretty bare otherwise, and this works for every shape
+    # without needing per-theme artwork.
+    pdf.set_draw_color(*text_color)
+    pdf.set_fill_color(*text_color)
+    ex, ey = x0 + (entrance[0] + 0.5) * cell, y0 + (entrance[1] + 0.5) * cell
+    pole_h = cell * 0.7
+    pdf.set_line_width(cell * 0.06)
+    pdf.line(ex, ey + pole_h / 2, ex, ey - pole_h / 2)
+    pdf.polygon([
+        (ex, ey - pole_h / 2),
+        (ex + cell * 0.4, ey - pole_h / 2 + cell * 0.15),
+        (ex, ey - pole_h / 2 + cell * 0.3),
+    ], fill=True)
+
+    fx, fy = x0 + (exit_[0] + 0.5) * cell, y0 + (exit_[1] + 0.5) * cell
+    pdf.star(fx, fy, cell * 0.18, cell * 0.38, 5, style="F")
+
     pdf.set_line_width(0.01)
 
 
@@ -252,7 +315,7 @@ def draw_maze_page(pdf, page_w, page_h, theme, title, walls, width, height, solu
 
 def build_maze_pdf(page_w, page_h, theme,
                     include_cover, cover_title, cover_photo, photo_fill,
-                    mz_num_mazes, mz_dims, show_answers, mz_start_number=1):
+                    mz_num_mazes, mz_dims, mz_shape, show_answers, mz_start_number=1):
     pdf = FPDF(unit="in", format=(page_w, page_h))
     pdf.set_auto_page_break(False)
     primary = theme["primary"]
@@ -277,12 +340,13 @@ def build_maze_pdf(page_w, page_h, theme,
             pdf.multi_cell(box_w - 0.4, 0.5, cover_title, align="C")
 
     width, height = mz_dims
+    cells = build_shape_cells(width, height, mz_shape)
     mz_puzzles = []
     for i in range(mz_num_mazes):
-        walls = generate_maze(width, height)
-        path = solve_maze(walls, width, height)
-        mz_puzzles.append(walls)
-        draw_maze_page(pdf, page_w, page_h, theme, f"MAZE {i + mz_start_number}", walls, width, height, None)
+        walls, entrance, exit_ = generate_maze(width, height, cells)
+        mz_puzzles.append((walls, entrance, exit_))
+        draw_maze_page(pdf, page_w, page_h, theme, f"MAZE {i + mz_start_number}",
+                        walls, cells, width, height, entrance, exit_, None)
 
     if show_answers and mz_puzzles:
         pdf.add_page()
@@ -297,9 +361,10 @@ def build_maze_pdf(page_w, page_h, theme,
         pdf.set_xy(box_x, box_y + box_h / 2 - 0.3)
         pdf.cell(box_w, 0.6, "ANSWER KEY", align="C")
 
-        for i, walls in enumerate(mz_puzzles):
-            path = solve_maze(walls, width, height)
-            draw_maze_page(pdf, page_w, page_h, theme, f"MAZE {i + mz_start_number} - ANSWER", walls, width, height, path)
+        for i, (walls, entrance, exit_) in enumerate(mz_puzzles):
+            path = solve_maze(walls, cells, entrance, exit_)
+            draw_maze_page(pdf, page_w, page_h, theme, f"MAZE {i + mz_start_number} - ANSWER",
+                            walls, cells, width, height, entrance, exit_, path)
 
     pdf_bytes = pdf.output()
     return BytesIO(bytes(pdf_bytes))
@@ -321,17 +386,31 @@ if check_password():
     if orientation == "Landscape":
         page_w, page_h = page_h, page_w
 
-    theme_choice = st.selectbox("Cover theme", list(COVER_THEME_HINTS.keys()), index=0)
+    st.markdown("### Maze settings")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        mz_num_mazes = st.number_input("Number of mazes", min_value=1, max_value=20, value=5)
+    with mc2:
+        mz_size_label = st.selectbox("Maze size", list(MAZE_SIZES.keys()), index=1)
+    with mc3:
+        mz_shape = st.selectbox("Maze shape", MAZE_SHAPES, index=0)
+    with mc4:
+        mz_start_number = st.number_input(
+            "Start numbering at",
+            min_value=1, max_value=999, value=1,
+            help="Use this to combine mazes from different batches into one book without renumbering by hand.",
+        )
+    mz_dims = MAZE_SIZES[mz_size_label]
 
     include_cover = st.checkbox("Include a cover page", value=True)
     cover_title = ""
     cover_photo = None
     photo_fill = False
     if include_cover:
-        cover_title = f"{theme_choice.upper()} MAZE"
+        cover_title = f"{mz_shape.upper()} MAZES"
 
         with st.expander("Need cover art? Generate a free AI image prompt"):
-            cover_prompt = build_cover_prompt(cover_title, theme_choice, page_w, page_h)
+            cover_prompt = build_cover_prompt(cover_title, mz_shape, page_w, page_h)
             st.caption(
                 "Copy this prompt into ChatGPT (or another AI image tool), ask it to generate the image, "
                 "then download that image and upload it below as your cover photo."
@@ -352,27 +431,13 @@ if check_password():
 
     show_answers = st.checkbox("Include an answer key section at the end", value=True)
 
-    st.markdown("### Maze settings")
-    mc1, mc2, mc3 = st.columns(3)
-    with mc1:
-        mz_num_mazes = st.number_input("Number of mazes", min_value=1, max_value=20, value=5)
-    with mc2:
-        mz_size_label = st.selectbox("Maze size", list(MAZE_SIZES.keys()), index=1)
-    with mc3:
-        mz_start_number = st.number_input(
-            "Start numbering at",
-            min_value=1, max_value=999, value=1,
-            help="Use this to combine mazes from different batches into one book without renumbering by hand.",
-        )
-    mz_dims = MAZE_SIZES[mz_size_label]
-
     export_png = st.checkbox("Also export as PNG images (zipped, 300 DPI)", value=False)
 
     if st.button("Generate Maze Book PDF"):
         pdf_buf = build_maze_pdf(
             page_w, page_h, theme,
             include_cover, cover_title, cover_photo, photo_fill,
-            int(mz_num_mazes), mz_dims, show_answers, int(mz_start_number),
+            int(mz_num_mazes), mz_dims, mz_shape, show_answers, int(mz_start_number),
         )
         pdf_bytes = pdf_buf.getvalue()
         st.success("Your maze book is ready! Here's a preview before you download:")
